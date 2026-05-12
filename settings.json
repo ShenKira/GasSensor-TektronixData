@@ -1,0 +1,27 @@
+{
+    "analysis": {
+        "rise_lower_percent": 10.0,
+        "rise_upper_percent": 90.0,
+        "fall_upper_percent": 90.0,
+        "fall_lower_percent": 10.0,
+        "prominence": 0.3,
+        "distance": 150,
+        "baseline_fraction": 0.01,
+        "peak_threshold": 0.0
+    },
+    "plot": {
+        "font_size_title": 16,
+        "font_size_axis_label": 15,
+        "font_size_tick": 12,
+        "font_size_legend": 10,
+        "font_size_annotation": 10,
+        "title_bold": true,
+        "axis_label_bold": true,
+        "line_width_raw": 0.5,
+        "line_width_smooth": 0.8,
+        "line_width_edge": 2.0
+    },
+    "last_open_dir": "C:\\Users\\shenz\\Documents\\GasSensor_TektronixData",
+    "gui_scale": 1.5,
+    "language": "zh"
+}
