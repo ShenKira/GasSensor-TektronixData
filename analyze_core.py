@@ -1,6 +1,7 @@
 """
 核心分析模块。
-包含数据加载、平滑、轮次切分和边沿分析逻辑。
+包含数据加载、平滑、轮次切分、边沿分析和B通道分析逻辑。
+采用管道式架构：加载 → 平滑 → 分割 → 边沿提取 → B通道分析。
 """
 
 import numpy as np
@@ -12,7 +13,7 @@ from typing import List, Optional, Tuple
 
 @dataclass
 class EdgeInfo:
-    """边沿信息"""
+    """边沿信息（通道A：电流）"""
     max_val: float
     min_val: float
     ratio: float
@@ -24,6 +25,14 @@ class EdgeInfo:
 
 
 @dataclass
+class ResistanceRoundInfo:
+    """单轮电阻分析结果（通道B：电阻）"""
+    r_max: float            # 上升沿前一区间电阻稳健最大值
+    r_min: float            # 上升沿后区间电阻稳健最小值
+    r_ratio: float          # r_max / r_min
+
+
+@dataclass
 class RoundResult:
     """单轮分析结果"""
     round_num: int
@@ -31,9 +40,10 @@ class RoundResult:
     peak_current: float
     rise: Optional[EdgeInfo]
     fall: Optional[EdgeInfo]
-    start_idx: int
-    peak_idx: int
-    end_idx: int
+    start_idx: int = 0
+    peak_idx: int = 0
+    end_idx: int = 0
+    res_info: Optional[ResistanceRoundInfo] = None
 
 
 @dataclass
@@ -47,6 +57,8 @@ class AnalysisResult:
     rounds: List[RoundResult]
     file_path: str
 
+
+# ── Stage 0: 数据加载 ──────────────────────────────────────────────
 
 def load_data(filepath: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """读取 xlsx 文件，返回 (时间, 电压, 电流, 电阻) 数组。"""
@@ -68,15 +80,26 @@ def load_data(filepath: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.nda
     )
 
 
+# ── Stage 1: 信号平滑 ──────────────────────────────────────────────
+
 def smooth_current(currents: np.ndarray, window: int = 21, poly: int = 3) -> np.ndarray:
     """Savitzky-Golay 平滑，消除单点毛刺。"""
     window = min(window, len(currents))
     if window % 2 == 0:
         window -= 1
     smoothed = savgol_filter(currents, window_length=window, polyorder=poly)
-    # 滤波器可能在极低值区域产生负值，截断到非负
     return np.clip(smoothed, 0, None)
 
+
+def smooth_signal(data: np.ndarray, window: int = 21, poly: int = 3) -> np.ndarray:
+    """通用 Savitzky-Golay 平滑（不截断负值），用于电阻等非电流信号。"""
+    window = min(window, len(data))
+    if window % 2 == 0:
+        window -= 1
+    return savgol_filter(data, window_length=window, polyorder=poly)
+
+
+# ── Stage 2: 实验阶段分割 ──────────────────────────────────────────
 
 def find_round_boundaries(
     times: np.ndarray,
@@ -88,6 +111,7 @@ def find_round_boundaries(
 ) -> List[Tuple[int, int, int]]:
     """
     识别每一轮实验的 (start_idx, peak_idx, end_idx)。
+    基于对数空间峰值检测，向左/右扫描至基线阈值。
     """
     log_current = np.log10(np.clip(currents_smooth, 1e-20, None))
 
@@ -124,6 +148,8 @@ def find_round_boundaries(
 
     return rounds
 
+
+# ── Stage 3: 边沿提取 ──────────────────────────────────────────────
 
 def interpolate_crossing_time(
     times: np.ndarray,
@@ -168,11 +194,26 @@ def _trimmed_mean(data: np.ndarray, trim_fraction: float = 0.25) -> float:
         return 0.0
     k = int(n * trim_fraction)
     if k * 2 >= n:
-        # 数据太少，直接取均值
         return float(np.mean(data))
     sorted_data = np.sort(data)
     trimmed = sorted_data[k:n - k]
     return float(np.mean(trimmed))
+
+
+def _trimmed_max(data: np.ndarray, n_points: int = 5) -> float:
+    """取最大的 n_points 个值的平均值（稳健最大值）。"""
+    if len(data) == 0:
+        return 0.0
+    k = min(n_points, len(data))
+    return float(np.mean(np.sort(data)[-k:]))
+
+
+def _trimmed_min(data: np.ndarray, n_points: int = 5) -> float:
+    """取最小的 n_points 个值的平均值（稳健最小值）。"""
+    if len(data) == 0:
+        return 0.0
+    k = min(n_points, len(data))
+    return float(np.mean(np.sort(data)[:k]))
 
 
 def analyze_edge(
@@ -186,8 +227,8 @@ def analyze_edge(
     upper_percent: float = 90.0,
 ) -> Optional[EdgeInfo]:
     """
-    分析一段上升沿或下降沿。
-    使用平滑数据确定交叉点和 min/max，保证一致性。
+    分析一段上升沿或下降沿（通道A：电流）。
+    使用平滑数据确定交叉点和 min/max。
     上升沿的 I_min 取 start_idx 之前 24 点的截断均值。
     """
     seg_t = times[start_idx:end_idx + 1]
@@ -198,7 +239,6 @@ def analyze_edge(
 
     max_val = float(np.max(seg_smooth))
 
-    # 上升沿：I_min 取上升开始前 24 点的截断均值（去头尾各25%）
     if is_rising:
         baseline_start = max(0, start_idx - 24)
         baseline_window = currents_smooth[baseline_start:start_idx]
@@ -231,7 +271,6 @@ def analyze_edge(
 
     transition_time = abs(t_upper - t_lower)
 
-    # 用平滑数据中最近邻索引获取交叉点处的电流值
     idx_lower = int(np.argmin(np.abs(times - t_lower)))
     idx_upper = int(np.argmin(np.abs(times - t_upper)))
 
@@ -247,6 +286,55 @@ def analyze_edge(
     )
 
 
+# ── Stage 3b: B通道电阻分析 ────────────────────────────────────────
+
+def analyze_resistance_per_round(
+    resistances: np.ndarray,
+    start_idx: int,
+    peak_idx: int,
+    end_idx: int,
+    n_points: int = 5,
+    pre_window: int = 24,
+    post_window: int = 24,
+) -> Optional[ResistanceRoundInfo]:
+    """
+    对单轮实验计算电阻分析指标（通道B：电阻）。
+
+    Rmax: 上升沿前一区间 (start_idx-pre_window, start_idx) 内电阻的稳健最大值
+          （取最大的 n_points 个点平均）
+    Rmin: 上升沿后区间 (peak_idx, peak_idx+post_window) 内电阻的稳健最小值
+          （取最小的 n_points 个点平均）
+    区间均以通道A（电流）的分割边界为基准。
+    """
+    # 上升沿前区间
+    pre_start = max(0, start_idx - pre_window)
+    pre_rise_R = resistances[pre_start:start_idx]
+
+    # 上升沿后区间
+    post_start = peak_idx
+    post_end = min(peak_idx + post_window, end_idx)
+    if post_end <= post_start:
+        post_end = end_idx + 1
+    post_rise_R = resistances[post_start:post_end]
+
+    if len(pre_rise_R) == 0 or len(post_rise_R) == 0:
+        return None
+
+    r_max = _trimmed_max(pre_rise_R, n_points)
+    r_min = _trimmed_min(post_rise_R, n_points)
+
+    if r_min <= 0:
+        return None
+
+    return ResistanceRoundInfo(
+        r_max=r_max,
+        r_min=r_min,
+        r_ratio=r_max / r_min,
+    )
+
+
+# ── Stage 4: 管道编排 ──────────────────────────────────────────────
+
 def run_analysis(
     filepath: str,
     rise_lower_percent: float = 10.0,
@@ -257,11 +345,28 @@ def run_analysis(
     distance: int = 150,
     baseline_fraction: float = 0.01,
     peak_threshold: float = 1e-7,
+    b_channel: str = "",
 ) -> AnalysisResult:
-    """运行完整的分析流程。"""
+    """
+    运行完整的分析管道。
+
+    Stages:
+      0. 加载数据
+      1. 平滑电流
+      2. 实验阶段分割（基于电流峰值检测）
+      3. 对每轮提取电流上升/下降边沿（通道A）
+      4. （可选）B通道分析：电阻 → 每轮Rmax/Rmin；电压 → 全局RMS/RMSE
+
+    参数:
+        b_channel: "" (无), "resistance", "voltage"
+    """
+    # Stage 0: 加载
     times, voltages, currents, resistances = load_data(filepath)
+
+    # Stage 1: 平滑电流
     currents_smooth = smooth_current(currents, window=21, poly=3)
 
+    # Stage 2: 分割
     round_boundaries = find_round_boundaries(
         times, currents_smooth,
         prominence=prominence,
@@ -270,20 +375,28 @@ def run_analysis(
         peak_threshold=peak_threshold,
     )
 
+    # Stage 3: 通道A边沿提取
     rounds = []
     for i, (start, peak, end) in enumerate(round_boundaries):
-        # 上升沿分析：使用平滑数据
         rise_info = analyze_edge(
             times, currents, currents_smooth, start, peak, is_rising=True,
             lower_percent=rise_lower_percent,
             upper_percent=rise_upper_percent,
         )
-        # 下降沿分析：使用平滑数据
         fall_info = analyze_edge(
             times, currents, currents_smooth, peak, end, is_rising=False,
             lower_percent=fall_lower_percent,
             upper_percent=fall_upper_percent,
         )
+
+        # Stage 3b: B通道电阻分析（按需，基于通道A分割边界）
+        res_info = None
+        if b_channel == "resistance":
+            res_info = analyze_resistance_per_round(
+                resistances, start, peak, end,
+                n_points=5, pre_window=24, post_window=24,
+            )
+
         rounds.append(RoundResult(
             round_num=i + 1,
             peak_time=times[peak],
@@ -293,6 +406,7 @@ def run_analysis(
             start_idx=start,
             peak_idx=peak,
             end_idx=end,
+            res_info=res_info,
         ))
 
     return AnalysisResult(

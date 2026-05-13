@@ -19,22 +19,32 @@ class AnalysisSettings:
     prominence: float = 0.3             # 峰值检测显著性（log10空间）
     distance: int = 150                 # 相邻峰最小间距（采样点数）
     baseline_fraction: float = 0.01     # 基线阈值（占峰值的比例）
-    peak_threshold: float = 1e-7        # 峰值电流绝对阈值（A）
+    peak_threshold: float = 0.0         # 峰值电流绝对阈值（A）
 
 
 @dataclass
 class PlotSettings:
     """绘图设置"""
-    font_size_title: int = 14           # 标题字体大小
-    font_size_axis_label: int = 12      # 轴标签字体大小
-    font_size_tick: int = 10            # 刻度字体大小
+    font_size_title: int = 16           # 标题字体大小
+    font_size_axis_label: int = 15      # 轴标签字体大小
+    font_size_tick: int = 12            # 刻度字体大小
     font_size_legend: int = 10          # 图例字体大小
-    font_size_annotation: int = 9       # 标注字体大小
-    title_bold: bool = False            # 标题是否加粗
-    axis_label_bold: bool = False       # 轴标签是否加粗
+    font_size_annotation: int = 10      # 标注字体大小
+    title_bold: bool = True             # 标题是否加粗
+    axis_label_bold: bool = True        # 轴标签是否加粗
     line_width_raw: float = 0.5         # 原始数据线宽
     line_width_smooth: float = 0.8      # 平滑数据线宽
     line_width_edge: float = 2.0        # 边沿线宽
+    # 颜色设置
+    color_raw: str = "#000000"          # 原始数据颜色
+    color_smooth: str = "#1f77b4"       # 平滑数据颜色
+    color_rise: str = "#2ca02c"         # 上升沿颜色
+    color_fall: str = "#d62728"         # 下降沿颜色
+    color_peak: str = "#ff0000"         # 峰值标记颜色
+    color_rise_marker: str = "#2ca02c"  # 上升沿交叉点标记颜色
+    color_fall_marker: str = "#ff7f0e"  # 下降沿交叉点标记颜色
+    color_voltage: str = "#c92a2a"      # 电压曲线颜色
+    color_resistance: str = "#862e9c"   # 电阻曲线颜色
 
 
 @dataclass
@@ -43,8 +53,9 @@ class AppSettings:
     analysis: AnalysisSettings = None
     plot: PlotSettings = None
     last_open_dir: str = ""             # 上次打开的目录
-    gui_scale: float = 1.0              # GUI缩放比例
-    language: str = "en"                # 界面语言
+    gui_scale: float = 1.5              # GUI缩放比例
+    language: str = "zh"                # 界面语言
+    b_channel: str = ""                 # B通道选择："" / "resistance" / "voltage"
 
     def __post_init__(self):
         if self.analysis is None:
@@ -82,6 +93,8 @@ class SettingsManager:
                     self.settings.gui_scale = data['gui_scale']
                 if 'language' in data:
                     self.settings.language = data['language']
+                if 'b_channel' in data:
+                    self.settings.b_channel = data['b_channel']
             except (json.JSONDecodeError, TypeError) as e:
                 print(f"警告: 设置文件格式错误，使用默认设置: {e}")
                 self.settings = AppSettings()
@@ -98,6 +111,7 @@ class SettingsManager:
             'last_open_dir': self.settings.last_open_dir,
             'gui_scale': self.settings.gui_scale,
             'language': self.settings.language,
+            'b_channel': self.settings.b_channel,
         }
         with open(self.settings_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
@@ -140,4 +154,9 @@ class SettingsManager:
     def update_language(self, language: str):
         """更新界面语言"""
         self.settings.language = language
+        self.save()
+
+    def update_b_channel(self, b_channel: str):
+        """更新B通道选择"""
+        self.settings.b_channel = b_channel
         self.save()

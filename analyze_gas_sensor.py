@@ -38,7 +38,8 @@ def print_results(results, settings):
     print(sep)
 
     hdr = (f"{'Round':>5}  {'Peak Time(s)':>12}  {'Peak I(A)':>14}  "
-           f"{'Rise I_max(A)':>14}  {'Rise I_min(A)':>14}  {'I_max/I_min':>12}  "
+           f"{f'I_{analysis.rise_upper_percent:.0f}%(A)':>14}  "
+           f"{f'I_{analysis.rise_lower_percent:.0f}%(A)':>14}  {'I_max/I_min':>12}  "
            f"{f'{analysis.rise_lower_percent:.0f}-{analysis.rise_upper_percent:.0f}% Rise(s)':>16}  "
            f"{f'{analysis.fall_upper_percent:.0f}-{analysis.fall_lower_percent:.0f}% Fall(s)':>16}")
     print(hdr)
@@ -50,8 +51,8 @@ def print_results(results, settings):
         rise_ratio_s = f"{rise.ratio:.2f}" if rise else "N/A"
         rise_time_s = f"{rise.transition_time:.4f}" if rise else "N/A"
         fall_time_s = f"{fall.transition_time:.4f}" if fall else "N/A"
-        rise_max_s = f"{rise.max_val:.6e}" if rise else "N/A"
-        rise_min_s = f"{rise.min_val:.6e}" if rise else "N/A"
+        rise_max_s = f"{rise.i_at_upper:.6e}" if rise else "N/A"
+        rise_min_s = f"{rise.i_at_lower:.6e}" if rise else "N/A"
 
         print(f"{r.round_num:>5}  {r.peak_time:>12.2f}  {r.peak_current:>14.6e}  "
               f"{rise_max_s:>14}  {rise_min_s:>14}  {rise_ratio_s:>12}  "
@@ -108,27 +109,23 @@ def plot_results(result, settings):
     font_family = 'Times New Roman'
 
     # 全局电流-时间曲线
-    ax.plot(times, currents, 'k-', linewidth=plot_settings.line_width_raw, alpha=0.4, label='Raw data')
-    ax.plot(times, currents_smooth, 'b-', linewidth=plot_settings.line_width_smooth, alpha=0.7, label='Smoothed')
+    ax.plot(times, currents, color=plot_settings.color_raw, linewidth=plot_settings.line_width_raw, alpha=0.4, label='Raw data')
+    ax.plot(times, currents_smooth, color=plot_settings.color_smooth, linewidth=plot_settings.line_width_smooth, alpha=0.7, label='Smoothed')
 
     # 标记每一轮的上升沿和下降沿
-    colors_rise = plt.cm.Greens(np.linspace(0.4, 0.9, len(rounds)))
-    colors_fall = plt.cm.Reds(np.linspace(0.4, 0.9, len(rounds)))
-
-    for i, r in enumerate(rounds):
+    for r in rounds:
         start, peak, end = r.start_idx, r.peak_idx, r.end_idx
 
-        # 使用平滑数据，保证与峰值检测/分析结果的一致性
         ax.plot(
             times[start:peak + 1], currents_smooth[start:peak + 1],
-            color=colors_rise[i], linewidth=plot_settings.line_width_edge,
+            color=plot_settings.color_rise, linewidth=plot_settings.line_width_edge,
         )
         ax.plot(
             times[peak:end + 1], currents_smooth[peak:end + 1],
-            color=colors_fall[i], linewidth=plot_settings.line_width_edge,
+            color=plot_settings.color_fall, linewidth=plot_settings.line_width_edge,
         )
 
-        ax.plot(times[peak], currents_smooth[peak], 'v', color='red', markersize=6)
+        ax.plot(times[peak], currents_smooth[peak], 'v', color=plot_settings.color_peak, markersize=6)
         ax.annotate(
             f'#{r.round_num}',
             xy=(times[peak], currents_smooth[peak]),
@@ -141,22 +138,32 @@ def plot_results(result, settings):
             for key, marker in [('t_lower', 'o'), ('t_upper', 's')]:
                 t_val = getattr(r.rise, key)
                 idx = np.argmin(np.abs(times - t_val))
-                ax.plot(t_val, currents_smooth[idx], marker, color='green', markersize=5)
+                ax.plot(t_val, currents_smooth[idx], marker,
+                        color=plot_settings.color_rise_marker, markersize=5)
         if r.fall:
             for key, marker in [('t_upper', 'o'), ('t_lower', 's')]:
                 t_val = getattr(r.fall, key)
                 idx = np.argmin(np.abs(times - t_val))
-                ax.plot(t_val, currents_smooth[idx], marker, color='orange', markersize=5)
+                ax.plot(t_val, currents_smooth[idx], marker,
+                        color=plot_settings.color_fall_marker, markersize=5)
 
     # 图例
+    rl = analysis_settings.rise_lower_percent
+    ru = analysis_settings.rise_upper_percent
+    fu = analysis_settings.fall_upper_percent
+    fl = analysis_settings.fall_lower_percent
     legend_elements = [
-        Line2D([0], [0], color='green', linewidth=2, label='Rising edge'),
-        Line2D([0], [0], color='red', linewidth=2, label='Falling edge'),
-        Line2D([0], [0], marker='v', color='red', linestyle='None', markersize=6, label='Peak'),
-        Line2D([0], [0], marker='o', color='green', linestyle='None', markersize=5,
-               label=f'{analysis_settings.rise_lower_percent:.0f}% point (rise)'),
-        Line2D([0], [0], marker='s', color='green', linestyle='None', markersize=5,
-               label=f'{analysis_settings.rise_upper_percent:.0f}% point (rise)'),
+        Line2D([0], [0], color=plot_settings.color_rise, linewidth=2, label='Rising edge'),
+        Line2D([0], [0], color=plot_settings.color_fall, linewidth=2, label='Falling edge'),
+        Line2D([0], [0], marker='v', color=plot_settings.color_peak, linestyle='None', markersize=6, label='Peak'),
+        Line2D([0], [0], marker='o', color=plot_settings.color_rise_marker, linestyle='None', markersize=5,
+               label=f'{rl:.0f}%(P.E.)'),
+        Line2D([0], [0], marker='s', color=plot_settings.color_rise_marker, linestyle='None', markersize=5,
+               label=f'{ru:.0f}%(P.E.)'),
+        Line2D([0], [0], marker='o', color=plot_settings.color_fall_marker, linestyle='None', markersize=5,
+               label=f'{fu:.0f}%(N.E.)'),
+        Line2D([0], [0], marker='s', color=plot_settings.color_fall_marker, linestyle='None', markersize=5,
+               label=f'{fl:.0f}%(N.E.)'),
     ]
     ax.legend(handles=legend_elements, loc='upper right',
               fontsize=plot_settings.font_size_legend, prop={'family': font_family})
