@@ -30,7 +30,7 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
 from settings_manager import SettingsManager, AppSettings, AnalysisSettings
-from analyze_core import run_analysis, AnalysisResult
+from analyze_core import run_analysis, AnalysisResult, OvershootInfo
 from language_manager import LanguageManager
 
 
@@ -839,6 +839,12 @@ class PlotCanvas(FigureCanvas):
                     self.ax.plot(t_val, currents_smooth_scaled[idx], marker,
                                  color=plot_settings.color_fall_marker, markersize=5)
 
+            # 过冲峰：快速下降起点虚线标记
+            if r.is_overshoot and r.overshoot_info:
+                rapid_t = r.overshoot_info.rapid_descent_start_time
+                self.ax.axvline(x=rapid_t, color='orange', linestyle='--',
+                                alpha=0.6, linewidth=1)
+
         self.ax.set_ylabel(
             f'Current ({current_unit})',
             fontsize=plot_settings.font_size_axis_label,
@@ -1089,6 +1095,18 @@ class MainWindow(QMainWindow):
         scale_layout.addWidget(self.combo_right_scale)
 
         left_layout.addWidget(self.scale_group)
+
+        # 峰值类型指示标签
+        self.peak_type_label = QLabel("")
+        self.peak_type_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.peak_type_label.setStyleSheet(
+            "QLabel { font-size: 12px; font-weight: bold; color: #0969da; "
+            "padding: 8px; border: 1px solid #d0d7de; border-radius: 6px; "
+            "background-color: #f6f8fa; }"
+        )
+        self.peak_type_label.setVisible(False)
+        left_layout.addWidget(self.peak_type_label)
+
         left_layout.addStretch()
         main_layout.addWidget(left_panel)
 
@@ -1269,12 +1287,50 @@ class MainWindow(QMainWindow):
             self._refresh_plot()
             self._update_table()
 
+            # 更新峰值类型指示
+            self._update_peak_type_label()
+
             self.statusBar().showMessage(
                 self._tr("status_analyzed", filename=Path(filepath).name, n=len(self.analysis_result.rounds))
             )
         except Exception as e:
             QMessageBox.critical(self, self._tr("msg_error"), self._tr("msg_analysis_failed", error=str(e)))
             self.statusBar().showMessage(self._tr("status_failed"))
+
+    def _update_peak_type_label(self):
+        """更新峰值类型指示标签"""
+        if not self.analysis_result or not self.analysis_result.rounds:
+            self.peak_type_label.setVisible(False)
+            return
+
+        rounds = self.analysis_result.rounds
+        overshoot_count = sum(1 for r in rounds if r.is_overshoot)
+        total = len(rounds)
+
+        if overshoot_count == 0:
+            self.peak_type_label.setText(self._tr("peak_type_all_saturation"))
+            self.peak_type_label.setStyleSheet(
+                "QLabel { font-size: 12px; font-weight: bold; color: #d62728; "
+                "padding: 8px; border: 1px solid #d0d7de; border-radius: 6px; "
+                "background-color: #f6f8fa; }"
+            )
+        elif overshoot_count == total:
+            self.peak_type_label.setText(self._tr("peak_type_all_overshoot"))
+            self.peak_type_label.setStyleSheet(
+                "QLabel { font-size: 12px; font-weight: bold; color: #2ca02c; "
+                "padding: 8px; border: 1px solid #d0d7de; border-radius: 6px; "
+                "background-color: #f6f8fa; }"
+            )
+        else:
+            self.peak_type_label.setText(
+                self._tr("peak_type_mixed", n_overshoot=overshoot_count, total=total)
+            )
+            self.peak_type_label.setStyleSheet(
+                "QLabel { font-size: 12px; font-weight: bold; color: #0969da; "
+                "padding: 8px; border: 1px solid #d0d7de; border-radius: 6px; "
+                "background-color: #f6f8fa; }"
+            )
+        self.peak_type_label.setVisible(True)
 
     def _update_table(self):
         """更新数据表格（每列使用独立单位以避免精度显示丢失）"""
@@ -1297,6 +1353,8 @@ class MainWindow(QMainWindow):
         rise_lower_vals = [r.rise.i_at_lower for r in rounds if r.rise]
         fall_upper_vals = [r.fall.i_at_upper for r in rounds if r.fall]
         fall_lower_vals = [r.fall.i_at_lower for r in rounds if r.fall]
+        i90_stable_vals = [r.overshoot_info.i_90_stable for r in rounds
+                           if r.overshoot_info]
 
         peak_unit, peak_scale = _column_unit_scale(peak_vals, get_current_unit_and_scale)
         idle_unit, idle_scale = _column_unit_scale(idle_vals, get_current_unit_and_scale)
@@ -1304,6 +1362,7 @@ class MainWindow(QMainWindow):
         rl_unit, rl_scale = _column_unit_scale(rise_lower_vals, get_current_unit_and_scale)
         fu_unit, fu_scale = _column_unit_scale(fall_upper_vals, get_current_unit_and_scale)
         fl_unit, fl_scale = _column_unit_scale(fall_lower_vals, get_current_unit_and_scale)
+        i90_unit, i90_scale = _column_unit_scale(i90_stable_vals, get_current_unit_and_scale)
 
         headers = [
             self._tr("col_round"),
@@ -1312,6 +1371,10 @@ class MainWindow(QMainWindow):
             self._tr("col_response"),
             self._tr("col_rise_time"),
             self._tr("col_fall_time"),
+            self._tr("col_peak_type"),
+            self._tr("col_slow_descent_time"),
+            f'{self._tr("col_i_90_stable")} ({i90_unit})',
+            self._tr("col_response_stable"),
             f'{self._tr("col_rise_i_upper", percent=f"{ru:.0f}")} ({ru_unit})',
             f'{self._tr("col_rise_i_lower", percent=f"{rl:.0f}")} ({rl_unit})',
             f'{self._tr("col_fall_i_upper", percent=f"{fu:.0f}")} ({fu_unit})',
@@ -1349,22 +1412,39 @@ class MainWindow(QMainWindow):
             self.data_table.setItem(i, 4, QTableWidgetItem(rise_time_str))
             self.data_table.setItem(i, 5, QTableWidgetItem(fall_time_str))
 
-            if r.rise:
-                self.data_table.setItem(i, 6, QTableWidgetItem(f"{r.rise.i_at_upper * ru_scale:.4f}"))
-                self.data_table.setItem(i, 7, QTableWidgetItem(f"{r.rise.i_at_lower * rl_scale:.4f}"))
+            # 峰类型、慢下降时间、I_90_Stable、Response(Stable)
+            peak_type_str = self._tr("peak_type_overshoot") if r.is_overshoot else self._tr("peak_type_saturation")
+            self.data_table.setItem(i, 6, QTableWidgetItem(peak_type_str))
+
+            if r.overshoot_info:
+                sdt_str = f"{r.overshoot_info.slow_descent_time:.4f}"
+                i90_str = f"{r.overshoot_info.i_90_stable * i90_scale:.4f}"
+                idle_for_resp = r.rise.min_val if r.rise else 0
+                resp_stable_str = f"{r.overshoot_info.i_90_stable / idle_for_resp:.2f}" if idle_for_resp > 0 else "N/A"
             else:
-                self.data_table.setItem(i, 6, QTableWidgetItem("N/A"))
-                self.data_table.setItem(i, 7, QTableWidgetItem("N/A"))
+                sdt_str = "N/A"
+                i90_str = "N/A"
+                resp_stable_str = "N/A"
+            self.data_table.setItem(i, 7, QTableWidgetItem(sdt_str))
+            self.data_table.setItem(i, 8, QTableWidgetItem(i90_str))
+            self.data_table.setItem(i, 9, QTableWidgetItem(resp_stable_str))
+
+            if r.rise:
+                self.data_table.setItem(i, 10, QTableWidgetItem(f"{r.rise.i_at_upper * ru_scale:.4f}"))
+                self.data_table.setItem(i, 11, QTableWidgetItem(f"{r.rise.i_at_lower * rl_scale:.4f}"))
+            else:
+                self.data_table.setItem(i, 10, QTableWidgetItem("N/A"))
+                self.data_table.setItem(i, 11, QTableWidgetItem("N/A"))
 
             if r.fall:
-                self.data_table.setItem(i, 8, QTableWidgetItem(f"{r.fall.i_at_upper * fu_scale:.4f}"))
-                self.data_table.setItem(i, 9, QTableWidgetItem(f"{r.fall.i_at_lower * fl_scale:.4f}"))
+                self.data_table.setItem(i, 12, QTableWidgetItem(f"{r.fall.i_at_upper * fu_scale:.4f}"))
+                self.data_table.setItem(i, 13, QTableWidgetItem(f"{r.fall.i_at_lower * fl_scale:.4f}"))
             else:
-                self.data_table.setItem(i, 8, QTableWidgetItem("N/A"))
-                self.data_table.setItem(i, 9, QTableWidgetItem("N/A"))
+                self.data_table.setItem(i, 12, QTableWidgetItem("N/A"))
+                self.data_table.setItem(i, 13, QTableWidgetItem("N/A"))
 
             if b_channel == "resistance":
-                col_offset = 10
+                col_offset = 14
                 if r.res_info:
                     self.data_table.setItem(i, col_offset,
                         QTableWidgetItem(f"{r.res_info.r_max * rmax_scale:.2f}"))
@@ -1551,6 +1631,8 @@ class MainWindow(QMainWindow):
             rise_lower_vals = [r.rise.i_at_lower for r in rounds if r.rise]
             fall_upper_vals = [r.fall.i_at_upper for r in rounds if r.fall]
             fall_lower_vals = [r.fall.i_at_lower for r in rounds if r.fall]
+            i90_stable_vals = [r.overshoot_info.i_90_stable for r in rounds
+                               if r.overshoot_info]
 
             peak_unit, peak_scale = _column_unit_scale(peak_vals, get_current_unit_and_scale)
             idle_unit, idle_scale = _column_unit_scale(idle_vals, get_current_unit_and_scale)
@@ -1558,6 +1640,7 @@ class MainWindow(QMainWindow):
             rl_unit, rl_scale = _column_unit_scale(rise_lower_vals, get_current_unit_and_scale)
             fu_unit, fu_scale = _column_unit_scale(fall_upper_vals, get_current_unit_and_scale)
             fl_unit, fl_scale = _column_unit_scale(fall_lower_vals, get_current_unit_and_scale)
+            i90_unit, i90_scale = _column_unit_scale(i90_stable_vals, get_current_unit_and_scale)
 
             rmax_unit = rmin_unit = ""
             rmax_scale = rmin_scale = 1.0
@@ -1577,6 +1660,10 @@ class MainWindow(QMainWindow):
                 "Response",
                 "Rise Time (s)",
                 "Fall Time (s)",
+                "Peak Type",
+                "Slow Descent Time (s)",
+                f"I_90_Stable ({i90_unit})",
+                "Response(Stable)",
                 f"I_{ru:.0f}% (Rise) ({ru_unit})",
                 f"I_{rl:.0f}% (Rise) ({rl_unit})",
                 f"I_{fu:.0f}% (Fall) ({fu_unit})",
@@ -1593,6 +1680,16 @@ class MainWindow(QMainWindow):
             if result_idx > 0:
                 current_row += 1  # 文件间空行
             file_name = Path(result.file_path).name
+            # 峰值类型后缀
+            has_overshoot = any(r.is_overshoot for r in rounds)
+            has_saturation = any(not r.is_overshoot for r in rounds)
+            if has_overshoot and has_saturation:
+                type_suffix = "-过冲峰+饱和峰"
+            elif has_overshoot:
+                type_suffix = "-过冲峰"
+            else:
+                type_suffix = "-饱和峰"
+            file_name = file_name + type_suffix
             ws.merge_cells(start_row=current_row, start_column=1,
                            end_row=current_row, end_column=n_cols)
             cell = ws.cell(row=current_row, column=1, value=file_name)
@@ -1615,6 +1712,7 @@ class MainWindow(QMainWindow):
 
             # --- 数据行 ---
             for i, r in enumerate(rounds):
+                peak_type_str = "过冲峰" if r.is_overshoot else "饱和峰"
                 row_data = [
                     r.round_num,
                     r.peak_current * peak_scale,
@@ -1622,6 +1720,10 @@ class MainWindow(QMainWindow):
                     r.rise.ratio if r.rise else None,
                     r.rise.transition_time if r.rise else None,
                     r.fall.transition_time if r.fall else None,
+                    peak_type_str,
+                    r.overshoot_info.slow_descent_time if r.overshoot_info else None,
+                    r.overshoot_info.i_90_stable * i90_scale if r.overshoot_info else None,
+                    r.overshoot_info.i_90_stable / r.rise.min_val if (r.overshoot_info and r.rise and r.rise.min_val > 0) else None,
                     r.rise.i_at_upper * ru_scale if r.rise else None,
                     r.rise.i_at_lower * rl_scale if r.rise else None,
                     r.fall.i_at_upper * fu_scale if r.fall else None,
@@ -1659,21 +1761,28 @@ class MainWindow(QMainWindow):
                     ws.cell(row=current_row, column=5).number_format = '0.0000'
                 if row_data[5] is not None:
                     ws.cell(row=current_row, column=6).number_format = '0.0000'
-                if row_data[6] is not None:
-                    ws.cell(row=current_row, column=7).number_format = '0.0000'
+                # col 6 = peak type (text), col 7 = slow_descent_time
                 if row_data[7] is not None:
                     ws.cell(row=current_row, column=8).number_format = '0.0000'
                 if row_data[8] is not None:
                     ws.cell(row=current_row, column=9).number_format = '0.0000'
                 if row_data[9] is not None:
-                    ws.cell(row=current_row, column=10).number_format = '0.0000'
+                    ws.cell(row=current_row, column=10).number_format = '0.00'
+                if row_data[10] is not None:
+                    ws.cell(row=current_row, column=11).number_format = '0.0000'
+                if row_data[11] is not None:
+                    ws.cell(row=current_row, column=12).number_format = '0.0000'
+                if row_data[12] is not None:
+                    ws.cell(row=current_row, column=13).number_format = '0.0000'
+                if row_data[13] is not None:
+                    ws.cell(row=current_row, column=14).number_format = '0.0000'
                 if has_resistance:
-                    if row_data[10] is not None:
-                        ws.cell(row=current_row, column=11).number_format = '0.00'
-                    if row_data[11] is not None:
-                        ws.cell(row=current_row, column=12).number_format = '0.00'
-                    if row_data[12] is not None:
-                        ws.cell(row=current_row, column=13).number_format = '0.00'
+                    if row_data[14] is not None:
+                        ws.cell(row=current_row, column=15).number_format = '0.00'
+                    if row_data[15] is not None:
+                        ws.cell(row=current_row, column=16).number_format = '0.00'
+                    if row_data[16] is not None:
+                        ws.cell(row=current_row, column=17).number_format = '0.00'
 
                 current_row += 1
 

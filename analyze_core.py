@@ -25,6 +25,16 @@ class EdgeInfo:
 
 
 @dataclass
+class OvershootInfo:
+    """过冲峰分析信息"""
+    rapid_descent_start_idx: int       # 快速下降起始点索引
+    rapid_descent_start_time: float    # 快速下降起始时间
+    i_90_stable: float                 # 过冲下降结束的稳定电流值（I_90_Stable）
+    slow_descent_time: float           # 慢下降时间（从峰值到I_90_Stable交叉点）
+    overshoot_descent_time: float      # 从上升起点到过冲下降达I_90_Stable的时间
+
+
+@dataclass
 class ResistanceRoundInfo:
     """单轮电阻分析结果（通道B：电阻）"""
     r_max: float            # 上升沿前一区间电阻稳健最大值
@@ -44,6 +54,8 @@ class RoundResult:
     peak_idx: int = 0
     end_idx: int = 0
     res_info: Optional[ResistanceRoundInfo] = None
+    is_overshoot: bool = False
+    overshoot_info: Optional[OvershootInfo] = None
 
 
 @dataclass
@@ -286,6 +298,112 @@ def analyze_edge(
     )
 
 
+# ── Stage 3a: 过冲峰检测 ──────────────────────────────────────────
+
+def detect_peak_type(
+    currents_smooth: np.ndarray,
+    peak_idx: int,
+    end_idx: int,
+    start_idx: int = 0,
+) -> bool:
+    """
+    判断单轮峰值类型。
+    返回 True 表示过冲峰，False 表示饱和峰。
+
+    原理（拟人化分析）：
+    - 过冲峰：峰值后立即下降，下降先快后慢趋近稳态，气体结束时再快速下降。
+      下降速率（负导数）在曲线上呈现两个"驼峰"（两个高下降斜率阶段）。
+    - 饱和峰：峰值后电流基本维持（平台），仅在气体通入结束时快速下降。
+      下降速率只有一个"驼峰"。
+
+    判据（双阶段下降检测）：
+    1. 计算下降段的负导数，找显著峰值
+    2. 若前40%和后30%各有一个峰、且中间有明显下降 → 过冲峰
+    3. 否则计算中点累积下降比：>0.3 → 过冲峰（下降分散），≤0.3 → 饱和峰（下降集中在末尾）
+    """
+    seg = currents_smooth[peak_idx:end_idx + 1]
+    n = len(seg)
+    if n < 10:
+        return False
+
+    # 负导数（下降速率）
+    neg_deriv = -np.gradient(seg)
+    max_d = np.max(neg_deriv)
+    if max_d <= 0:
+        return False
+
+    # 找显著导数峰（高度 > max*5%，间距 > 15点）
+    peaks_idx, _ = find_peaks(neg_deriv, height=max_d * 0.05)
+    if len(peaks_idx) > 1:
+        filtered = [peaks_idx[0]]
+        for p in peaks_idx[1:]:
+            if p - filtered[-1] >= 15:
+                filtered.append(p)
+        peaks_idx = np.array(filtered)
+
+    # 双阶段检测：前40%有峰 + 后30%有峰 + 中间有明显下降
+    two_phase = False
+    if len(peaks_idx) >= 2:
+        first, last = peaks_idx[0], peaks_idx[-1]
+        if first < n * 0.4 and last > n * 0.7:
+            valley = np.min(neg_deriv[first:last])
+            if valley < neg_deriv[first] * 0.5 and valley < neg_deriv[last] * 0.5:
+                two_phase = True
+
+    if two_phase:
+        return True
+
+    # 降级判断：中点累积下降比
+    diffs = np.diff(seg)
+    cum = np.cumsum(np.maximum(0, -diffs))
+    total = cum[-1] if len(cum) > 0 and cum[-1] > 0 else 1
+    mid_ratio = cum[len(cum) // 2] / total if len(cum) > 0 else 0
+
+    return mid_ratio > 0.3 and len(peaks_idx) >= 2
+
+
+def find_rapid_descent_start(
+    currents_smooth: np.ndarray,
+    peak_idx: int,
+    end_idx: int,
+    remaining_threshold: float = 0.50,
+) -> int:
+    """
+    在下降段 [peak_idx, end_idx] 中找到快速下降起始点。
+
+    算法：
+    1. 找到下降速率（负导数）最大的位置（快速下降的核心区域）
+    2. 从该位置向后扫描，找累积下降已超过(1-threshold)的位置
+       即剩余下降量不足总下降量的 threshold（默认50%）
+    3. 该位置即为慢下降→快下降的转换点
+
+    原理：过冲峰的慢下降阶段累积少量下降，快下降阶段累积大量下降。
+    找到"大部分下降尚未发生"的最后时刻，即为快下降的起点。
+    """
+    seg = currents_smooth[peak_idx:end_idx + 1]
+    n = len(seg)
+    if n < 5:
+        return peak_idx
+
+    # 累积下降
+    diffs = np.diff(seg)
+    descent = np.maximum(0, -diffs)
+    cum_descent = np.cumsum(descent)
+    total_descent = cum_descent[-1] if cum_descent[-1] > 0 else 1
+
+    # 找下降速率最大的位置
+    max_deriv_idx = int(np.argmax(-np.gradient(seg)))
+
+    # 从 max_deriv_idx 向后扫描，找 remaining < threshold
+    for j in range(max_deriv_idx, -1, -1):
+        remaining = 1.0 - cum_descent[j] / total_descent
+        if remaining < remaining_threshold:
+            return peak_idx + j
+
+    # 全段都是慢下降（饱和型：下降集中在末尾）
+    return end_idx
+
+
 # ── Stage 3b: B通道电阻分析 ────────────────────────────────────────
 
 def analyze_resistance_per_round(
@@ -383,11 +501,65 @@ def run_analysis(
             lower_percent=rise_lower_percent,
             upper_percent=rise_upper_percent,
         )
-        fall_info = analyze_edge(
-            times, currents, currents_smooth, peak, end, is_rising=False,
-            lower_percent=fall_lower_percent,
-            upper_percent=fall_upper_percent,
-        )
+
+        # 峰值类型判断
+        is_overshoot = detect_peak_type(currents_smooth, peak, end, start_idx=start)
+
+        overshoot_info = None
+        if is_overshoot:
+            # 找快速下降起始点
+            rapid_start = find_rapid_descent_start(currents_smooth, peak, end)
+
+            # 计算 I_90_Stable：过冲下降结束的稳定电流值
+            # 公式：(过冲峰值 - 气体结束前电流) * (100%-Y%) + 气体结束前电流
+            # 其中 Y% = rise_upper_percent
+            peak_val = currents_smooth[peak]
+            rapid_start_val = currents_smooth[rapid_start]
+            y_frac = rise_upper_percent / 100.0
+            i_90_stable = (peak_val - rapid_start_val) * (1.0 - y_frac) + rapid_start_val
+
+            # 找慢下降中电流达到I_90_Stable的交叉时间
+            slow_descent_time = 0.0
+            overshoot_descent_time = float(times[rapid_start]) - float(times[start])
+            if rapid_start > peak:
+                slow_seg = currents_smooth[peak:rapid_start + 1]
+                slow_times = times[peak:rapid_start + 1]
+                # 从峰顶向右扫描，找电流首次降到 I_90_Stable 以下
+                for j in range(len(slow_seg)):
+                    if slow_seg[j] <= i_90_stable:
+                        if j > 0 and slow_seg[j - 1] > i_90_stable:
+                            t1, t2 = slow_times[j - 1], slow_times[j]
+                            i1, i2 = slow_seg[j - 1], slow_seg[j]
+                            frac = (i1 - i_90_stable) / (i1 - i2) if i1 != i2 else 0
+                            cross_time = t1 + frac * (t2 - t1)
+                        else:
+                            cross_time = slow_times[j]
+                        slow_descent_time = float(cross_time) - float(times[peak])
+                        overshoot_descent_time = float(cross_time) - float(times[start])
+                        break
+
+            # 快速下降边沿分析（气体通入结束的快速下降）
+            fall_info = analyze_edge(
+                times, currents, currents_smooth,
+                rapid_start, end, is_rising=False,
+                lower_percent=fall_lower_percent,
+                upper_percent=fall_upper_percent,
+            )
+
+            overshoot_info = OvershootInfo(
+                rapid_descent_start_idx=rapid_start,
+                rapid_descent_start_time=float(times[rapid_start]),
+                i_90_stable=i_90_stable,
+                slow_descent_time=slow_descent_time,
+                overshoot_descent_time=overshoot_descent_time,
+            )
+        else:
+            # 饱和峰 — 保持原有逻辑
+            fall_info = analyze_edge(
+                times, currents, currents_smooth, peak, end, is_rising=False,
+                lower_percent=fall_lower_percent,
+                upper_percent=fall_upper_percent,
+            )
 
         # Stage 3b: B通道电阻分析（按需，基于通道A分割边界）
         res_info = None
@@ -407,6 +579,8 @@ def run_analysis(
             peak_idx=peak,
             end_idx=end,
             res_info=res_info,
+            is_overshoot=is_overshoot,
+            overshoot_info=overshoot_info,
         ))
 
     return AnalysisResult(

@@ -4,7 +4,7 @@
         "rise_upper_percent": 90.0,
         "fall_upper_percent": 90.0,
         "fall_lower_percent": 10.0,
-        "prominence": 0.3,
+        "prominence": 1.0000000000000002,
         "distance": 150,
         "baseline_fraction": 0.01,
         "peak_threshold": 0.0
@@ -30,7 +30,7 @@
         "color_voltage": "#c92a2a",
         "color_resistance": "#aaaaff"
     },
-    "last_open_dir": "C:\\Users\\ModularTagShen\\Documents\\GasSensor_TektronixData",
+    "last_open_dir": "C:\\Users\\shenz\\Documents\\GasSensor_TektronixData",
     "gui_scale": 1.5,
     "language": "zh",
     "b_channel": "resistance"

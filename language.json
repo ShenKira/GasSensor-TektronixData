@@ -112,7 +112,16 @@
         "msg_batch_file_failed": "Failed to process {filename}:\n{error}",
         "msg_batch_complete": "Batch Processing Complete",
         "msg_batch_complete_detail": "Successfully processed {n}/{total} file(s).\nSummary table saved to:\n{path}",
-        "msg_export_failed": "Failed to export Excel:\n{error}"
+        "msg_export_failed": "Failed to export Excel:\n{error}",
+        "col_peak_type": "Peak Type",
+        "col_slow_descent_time": "Slow Descent Time (s)",
+        "col_i_90_stable": "I_90_Stable",
+        "col_response_stable": "Response(Stable)",
+        "peak_type_overshoot": "Overshoot",
+        "peak_type_saturation": "Saturation",
+        "peak_type_all_overshoot": "Detected\nOvershoot Peaks",
+        "peak_type_all_saturation": "Detected\nSaturation Peaks",
+        "peak_type_mixed": "Detected\n{n_overshoot}/{total} Overshoot"
     },
     "zh": {
         "window_title": "气体传感器数据分析",
@@ -227,6 +236,15 @@
         "msg_batch_file_failed": "处理文件 {filename} 失败：\n{error}",
         "msg_batch_complete": "批量处理完成",
         "msg_batch_complete_detail": "成功处理 {n}/{total} 个文件。\n汇总表已保存至：\n{path}",
-        "msg_export_failed": "导出 Excel 失败：\n{error}"
+        "msg_export_failed": "导出 Excel 失败：\n{error}",
+        "col_peak_type": "峰类型",
+        "col_slow_descent_time": "慢下降时间 (s)",
+        "col_i_90_stable": "I_90_Stable",
+        "col_response_stable": "响应比(稳态)",
+        "peak_type_overshoot": "过冲峰",
+        "peak_type_saturation": "饱和峰",
+        "peak_type_all_overshoot": "识别到\n过冲峰",
+        "peak_type_all_saturation": "识别到\n饱和峰",
+        "peak_type_mixed": "识别到\n{n_overshoot}/{total} 过冲峰"
     }
 }
